@@ -41,9 +41,10 @@ func vec_size<T>(v: Vec<T>) -> usize {
 
 //need `for`
 func vec_erase<T>(v: Vec<T>, p:u8) -> Vec<T> {
-	for(let post=p; post < v.size; post = post + 1){
+	for(let post = p; post < v.size; post = post + 1){
 		vec_post(v,post, vec_get(v,post + 1));
 	}
+	
 	v.size = v.size - 1;
 	v
 }
@@ -53,6 +54,7 @@ func vec_insert<T>(v: Vec<T>, p:u8, nv: T) -> Vec<T>{
 		ptr = malloc(v.size + 1)
 		size = v.size + 1
 	};
+
 	let postv = 0; let posto = 0;
 	for(postv < v.size; postv = posto + 1, posto = posto + 1) {
 		if(postv == p){
@@ -65,7 +67,7 @@ func vec_insert<T>(v: Vec<T>, p:u8, nv: T) -> Vec<T>{
 	o
 }
 
-func vec_find<T> (v: vec<T>, content: T) -> *T {
+func vec_find<T> (v: Vec<T>, content: T) -> *T {
     let i: usize = 0;
     for(; i < v.size; i = i + 1) {
         let pos = u8(i);
@@ -77,13 +79,13 @@ func vec_find<T> (v: vec<T>, content: T) -> *T {
     vec_end(v)
 }
 
-func vec_swap<T> (v: vec<T>, i: u8, j: u8) -> void {
+func vec_swap<T> (v: Vec<T>, i: u8, j: u8) -> void {
     let temp = vec_get(v, i);
     vec_post(v, i, vec_get(v, j));
     vec_post(v, j, temp);
 }
 
-func _vec_partition<T> (v: vec<T>, low: usize, high: usize) -> usize {
+func _vec_partition<T> (v: Vec<T>, low: usize, high: usize) -> usize {
     let pivot_pos = u8(high);
     let pivot_val = vec_get(v, pivot_pos);
     let i: usize = low - 1;
@@ -100,7 +102,7 @@ func _vec_partition<T> (v: vec<T>, low: usize, high: usize) -> usize {
     return i + 1;
 }
 
-func _vec_quick_sort_recursive<T> (v: vec<T>, low: usize, high: usize) -> void {
+func _vec_quick_sort_recursive<T> (v: Vec<T>, low: usize, high: usize) -> void {
     if (low < high) {
         let pivot_idx = partition(v, low, high);
         if (pivot_idx > 0) {
@@ -110,7 +112,7 @@ func _vec_quick_sort_recursive<T> (v: vec<T>, low: usize, high: usize) -> void {
     }
 }
 
-func vec_sort<T> (v: vec<T>) -> void {
+func vec_sort<T> (v: Vec<T>) -> void {
     if (v.size <= 1) {
         
     }else{
@@ -118,11 +120,11 @@ func vec_sort<T> (v: vec<T>) -> void {
     }
 }
 
-func vec_begin<T> (v: vec<T>) -> *T {
+func vec_begin<T> (v: Vec<T>) -> *T {
 	v.ptr
 }
 
-func vec_end<T> (v: vec<T>) -> *T {
+func vec_end<T> (v: Vec<T>) -> *T {
 	v.ptr+v.size
 }
 
