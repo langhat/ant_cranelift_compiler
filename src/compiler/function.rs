@@ -124,8 +124,7 @@ pub fn compile_function(
     // 10. 声明参数变量
     for (i, (param_name, tyid)) in params.iter().enumerate() {
         let symbol = func_symbol_table.borrow_mut().define(&param_name);
-        let cranelift_ty =
-            convert_type_to_cranelift_type(&state.resolve_concrete_ty(*tyid, subst));
+        let cranelift_ty = convert_type_to_cranelift_type(&state.resolve_concrete_ty(*tyid, subst));
 
         func_builder.declare_var(Variable::from_u32(symbol.var_index as u32), cranelift_ty);
 
@@ -173,6 +172,16 @@ pub fn compile_function(
         } else {
             func_state.builder.ins().return_(&[]);
         }
+    }
+
+    #[cfg(feature = "debug")]
+    {
+        let func_ref = &func_state.builder.func;
+        println!("=== before finalize:\n{}", {
+            let mut s = String::new();
+            cranelift::codegen::write_function(&mut s, func_ref).unwrap();
+            s
+        });
     }
 
     func_state.builder.finalize();
