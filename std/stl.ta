@@ -80,7 +80,7 @@ func vec_insert<T>(v: Vec<T>, p: usize, nv: T) -> Vec<T> {
         i = i + 1usize;
     }
 
-	// vec_free(v);
+	vec_free(v);
 	o
 }
 
