@@ -19,7 +19,7 @@ use cranelift_object::{ObjectBuilder, ObjectModule};
 
 use ant_type_checker::{
     module::TypedModule,
-    ty::{IntTy, Ty},
+    ty::{IntTy, Ty, display_ty},
     typed_ast::{
         GetType, typed_expr::TypedExpression, typed_node::TypedNode, typed_stmt::TypedStatement,
     },
@@ -38,7 +38,7 @@ use crate::{
         get_platform_width,
         handler::{
             compile_build_struct::compile_build_struct, compile_call::compile_call,
-            compile_infix::compile_infix,
+            compile_cast::compile_cast, compile_infix::compile_infix,
         },
         imm::{int_value_to_imm, platform_width_to_int_type},
         table::{StructLayout, SymbolScope, SymbolTable, SymbolTy},
@@ -172,6 +172,7 @@ impl<'a> Compiler<'a> {
             Ty::Bool => Ok(1),
             Ty::Str => Ok(pointer_width),
             Ty::Function { .. } => Ok(pointer_width),
+            Ty::Ptr(_) => Ok(pointer_width),
             Ty::Struct { name, .. } => {
                 let SymbolTy::Struct(layout) =
                     state.get_table().borrow_mut().get(name).map_or_else(
@@ -184,6 +185,7 @@ impl<'a> Compiler<'a> {
 
                 Ok(layout.size)
             }
+
             Ty::AppliedGeneric(name, _) => {
                 let SymbolTy::Struct(layout) =
                     state.get_table().borrow_mut().get(name).map_or_else(
@@ -196,7 +198,11 @@ impl<'a> Compiler<'a> {
 
                 Ok(layout.size)
             }
-            _ => todo!(),
+
+            _ => todo!(
+                "todo ty {}",
+                display_ty(ty, state.get_typed_module_ref().tcx_ref())
+            ),
         }
     }
 
@@ -208,6 +214,7 @@ impl<'a> Compiler<'a> {
         match ty {
             Ty::IntTy(it) => Ok(it.get_bytes_size() as u32),
             Ty::Bool => Ok(1),
+            Ty::Ptr(_) => Ok(pointer_width),
             Ty::Str => Ok(pointer_width),
             Ty::Function { .. } => Ok(pointer_width),
             Ty::Struct { name, .. } => {
@@ -461,6 +468,8 @@ impl<'a> Compiler<'a> {
                             data_map: state.data_map,
                             generic_map: state.generic_map,
                             compiled_generic_map: state.compiled_generic_map,
+                            subst: &IndexMap::new(),
+
                             target_isa: state.target_isa.clone(),
 
                             arc_alloc: state.arc_alloc,
@@ -488,6 +497,16 @@ impl<'a> Compiler<'a> {
                             } else {
                                 func_state.builder.ins().return_(&[]);
                             }
+                        }
+
+                        #[cfg(feature = "debug")]
+                        {
+                            let func_ref = &func_state.builder.func;
+                            println!("=== before finalize:\n{}", {
+                                let mut s = String::new();
+                                cranelift::codegen::write_function(&mut s, func_ref).unwrap();
+                                s
+                            });
                         }
 
                         func_state.builder.finalize();
@@ -648,7 +667,7 @@ impl<'a> Compiler<'a> {
 
                 let val = Self::compile_expr(state, &value)?;
 
-                let obj_ty = state.tcx().get(*ty).clone();
+                let obj_ty = state.resolve_concrete_ty(*ty, state.subst);
 
                 // ARC: retain 新值
                 state.retain_if_needed(val, &obj_ty);
@@ -663,7 +682,11 @@ impl<'a> Compiler<'a> {
                     .builder
                     .def_var(Variable::from_u32(symbol.var_index as u32), val);
 
-                return Ok(state.builder.ins().iconst(types::I64, 0)); // unit
+                // unit
+                Ok(state
+                    .builder
+                    .ins()
+                    .iconst(convert_type_to_cranelift_type(&Ty::Unit), 0))
             }
 
             TypedStatement::Block { statements: it, .. } => {
@@ -708,7 +731,10 @@ impl<'a> Compiler<'a> {
                 state.builder.seal_block(exit);
 
                 // unit
-                Ok(state.builder.ins().iconst(types::I64, 0))
+                Ok(state
+                    .builder
+                    .ins()
+                    .iconst(convert_type_to_cranelift_type(&Ty::Unit), 0))
             }
 
             TypedStatement::Struct {
@@ -766,7 +792,10 @@ impl<'a> Compiler<'a> {
                 }
 
                 // unit
-                Ok(state.builder.ins().iconst(types::I64, 0))
+                Ok(state
+                    .builder
+                    .ins()
+                    .iconst(convert_type_to_cranelift_type(&Ty::Unit), 0))
             }
 
             TypedStatement::Extern {
@@ -785,7 +814,7 @@ impl<'a> Compiler<'a> {
                     params_type,
                     ret_type,
                     ..
-                } = state.tcx_ref().get(*ty)
+                } = state.tcx_ref().get(*ty).clone()
                 else {
                     return Err(format!("not a function: {ty}"));
                 };
@@ -793,7 +822,9 @@ impl<'a> Compiler<'a> {
                 let mut cranelift_params = params_type
                     .iter()
                     .map(|it| {
-                        AbiParam::new(convert_type_to_cranelift_type(state.tcx_ref().get(*it)))
+                        AbiParam::new(convert_type_to_cranelift_type(
+                            &state.resolve_concrete_ty(*it, state.subst),
+                        ))
                     })
                     .collect::<Vec<_>>();
 
@@ -805,7 +836,7 @@ impl<'a> Compiler<'a> {
                 extern_func_sig
                     .returns
                     .push(AbiParam::new(convert_type_to_cranelift_type(
-                        &state.tcx_ref().get(*ret_type),
+                        &state.resolve_concrete_ty(ret_type, state.subst),
                     )));
 
                 let extern_func_id = state
@@ -840,17 +871,22 @@ impl<'a> Compiler<'a> {
                 );
 
                 // unit
-                Ok(state.builder.ins().iconst(platform_width_to_int_type(), 0))
+                Ok(state
+                    .builder
+                    .ins()
+                    .iconst(convert_type_to_cranelift_type(&Ty::Unit), 0))
             }
 
             TypedStatement::Return { expr, .. } => {
-                let expr = state.get_expr_ref(*expr).clone();
+                if let Some(expr) = expr {
+                    let expr = state.get_expr_ref(*expr).clone();
 
-                let val = Self::compile_expr(state, &expr)?;
+                    let val = Self::compile_expr(state, &expr)?;
 
-                let obj_ty = state.tcx().get(expr.get_type()).clone();
+                    let obj_ty = state.tcx().get(expr.get_type()).clone();
 
-                state.retain_if_needed(val, &obj_ty);
+                    state.retain_if_needed(val, &obj_ty);
+                }
 
                 let symbols = state.table.borrow().map.clone();
 
@@ -861,6 +897,11 @@ impl<'a> Compiler<'a> {
                         state.emit_release(val);
                     }
                 }
+
+                let val = state
+                    .builder
+                    .ins()
+                    .iconst(convert_type_to_cranelift_type(&Ty::Unit), 0);
 
                 state.builder.ins().return_(&[val]);
 
@@ -932,7 +973,10 @@ impl<'a> Compiler<'a> {
                 }
 
                 // unit
-                Ok(state.builder.ins().iconst(platform_width_to_int_type(), 0))
+                Ok(state
+                    .builder
+                    .ins()
+                    .iconst(convert_type_to_cranelift_type(&Ty::Unit), 0))
             }
 
             _ => todo!("impl function 'compile_stmt'"),
@@ -960,13 +1004,11 @@ impl<'a> Compiler<'a> {
             }),
 
             TypedExpression::SizeOf(_, it, ty) => {
-                let val = state.get_expr_ref(*it).get_type();
+                let val_ty = state.get_expr_ref(*it).get_type();
+                let val_ty = &state.resolve_concrete_ty(val_ty, state.subst);
 
-                let ty_size = Self::get_type_size(
-                    state,
-                    state.tcx_ref().get(val),
-                    get_platform_width() as u32,
-                )? as i64;
+                let ty_size =
+                    Self::get_type_size(state, val_ty, get_platform_width() as u32)? as i64;
 
                 let ty = state.tcx_ref().get(*ty).clone();
 
@@ -1021,7 +1063,7 @@ impl<'a> Compiler<'a> {
                         return Ok(val_ptr);
                     }
 
-                    let ty = state.tcx_ref().get(*ty).clone();
+                    let ty = state.resolve_concrete_ty(*ty, state.subst);
 
                     return Ok(state.builder.ins().load(
                         convert_type_to_cranelift_type(&ty),
@@ -1073,14 +1115,17 @@ impl<'a> Compiler<'a> {
                 let obj_ptr = Self::compile_expr(state, &obj)?;
 
                 // 获取对象类型，确保是 struct
-                let obj_ty = obj.get_type();
+                let obj_ty = state.resolve_concrete_ty(obj.get_type(), state.subst);
 
-                let name = if let Ty::Struct { name, .. } = &state.tcx_ref().get(obj_ty) {
+                let name = if let Ty::Struct { name, .. } = &obj_ty {
                     name
-                } else if let Ty::AppliedGeneric(it, _) = &state.tcx_ref().get(obj_ty) {
+                } else if let Ty::AppliedGeneric(it, _) = &obj_ty {
                     it
                 } else {
-                    return Err("field access on non-struct type".into());
+                    return Err(format!(
+                        "field access on `{}` type",
+                        display_ty(&obj_ty, state.tcx_ref())
+                    ));
                 };
 
                 // 从符号表获取结构体布局
@@ -1153,15 +1198,23 @@ impl<'a> Compiler<'a> {
                         return Err(format!("assign to a type: `{}`", ident.value));
                     }
 
+                    let old_var_ty = state.resolve_concrete_ty(left.get_type(), state.subst);
+
                     let var = Variable::from_u32(var_symbol.var_index as u32);
 
-                    let old_val = state.builder.use_var(var);
+                    if old_var_ty.need_gc() {
+                        let old_val = state.builder.use_var(var);
 
-                    state.update_ptr(new_val, old_val);
+                        state.update_ptr(new_val, old_val);
+                    }
 
                     state.builder.def_var(var, new_val);
 
-                    return Ok(new_val); // 该值不会被使用
+                    // unit
+                    return Ok(state
+                        .builder
+                        .ins()
+                        .iconst(convert_type_to_cranelift_type(&Ty::Unit), 0));
                 } else if let TypedExpression::FieldAccess(_, obj, field, _) = left {
                     let obj = state.get_expr_ref(obj).clone();
 
@@ -1171,9 +1224,17 @@ impl<'a> Compiler<'a> {
                     let obj_ptr = Self::compile_expr(state, &obj)?;
 
                     // 获取对象类型，确保是 struct
-                    let obj_ty = obj.get_type();
-                    let Ty::Struct { name, .. } = &state.tcx_ref().get(obj_ty) else {
-                        return Err("field set on non-struct type".into());
+                    let obj_ty = state.resolve_concrete_ty(obj.get_type(), state.subst);
+
+                    let name = if let Ty::Struct { name, .. } = &obj_ty {
+                        name
+                    } else if let Ty::AppliedGeneric(it, _) = &obj_ty {
+                        it
+                    } else {
+                        return Err(format!(
+                            "field access on `{}` type",
+                            display_ty(&obj_ty, state.tcx_ref())
+                        ));
                     };
 
                     // 从符号表获取结构体布局
@@ -1182,10 +1243,6 @@ impl<'a> Compiler<'a> {
                         .borrow_mut()
                         .get(name)
                         .ok_or_else(|| format!("undefined struct: `{}`", name))?;
-
-                    if !sym.is_val {
-                        return Err(format!("assign to a type: `{}`", sym.name));
-                    }
 
                     let SymbolTy::Struct(layout) = sym.symbol_ty else {
                         Err(format!("not a struct"))?
@@ -1236,7 +1293,11 @@ impl<'a> Compiler<'a> {
                         state.release_if_needed(old, field_ty);
                     }
 
-                    return Ok(new_val);
+                    // unit
+                    return Ok(state
+                        .builder
+                        .ins()
+                        .iconst(convert_type_to_cranelift_type(&Ty::Unit), 0));
                 } else if let TypedExpression::Prefix {
                     op,
                     right: ptr_expr_id,
@@ -1249,7 +1310,9 @@ impl<'a> Compiler<'a> {
                         let addr_val = Self::compile_expr(state, &ptr_val)?;
 
                         // 获取新值的类型, 以便正确 retain/release
-                        let val_ty = state.tcx().get(right.get_type()).clone();
+                        let val_ty = state
+                            .resolve_concrete_ty(right.get_type(), state.subst)
+                            .clone();
 
                         let new_val = Self::compile_expr(state, &right)?;
 
@@ -1278,7 +1341,11 @@ impl<'a> Compiler<'a> {
                                 .store(MemFlags::new(), new_val, addr_val, 0);
                         }
 
-                        return Ok(new_val);
+                        // unit
+                        return Ok(state
+                            .builder
+                            .ins()
+                            .iconst(convert_type_to_cranelift_type(&Ty::Unit), 0));
                     }
 
                     todo!()
@@ -1409,6 +1476,7 @@ impl<'a> Compiler<'a> {
                         block_ast.get_type(),
                         &block_ast,
                         name,
+                        state.subst,
                     );
                 }
 
@@ -1430,6 +1498,7 @@ impl<'a> Compiler<'a> {
                 condition,
                 consequence,
                 else_block,
+                ty,
                 ..
             } => {
                 let condition = state.get_expr_ref(*condition).clone();
@@ -1438,15 +1507,26 @@ impl<'a> Compiler<'a> {
                 let then_block = state.builder.create_block();
                 let end_block = state.builder.create_block();
 
-                let consequence_ty = state.tcx().get(consequence.get_type()).clone();
+                let ty = state.resolve_concrete_ty(*ty, state.subst).clone();
 
                 state
                     .builder
-                    .append_block_param(end_block, convert_type_to_cranelift_type(&consequence_ty));
+                    .append_block_param(end_block, convert_type_to_cranelift_type(&ty));
 
                 let else_block_label = match else_block {
                     Some(_) => Some(state.builder.create_block()),
                     None => None,
+                };
+
+                let else_args = if else_block_label.is_none() {
+                    vec![
+                        state
+                            .builder
+                            .ins()
+                            .iconst(convert_type_to_cranelift_type(&ty), 0),
+                    ]
+                } else {
+                    vec![]
                 };
 
                 let cond_val = Self::compile_expr(state, &condition)?;
@@ -1459,7 +1539,7 @@ impl<'a> Compiler<'a> {
                     } else {
                         end_block
                     },
-                    &[],
+                    &else_args,
                 );
 
                 state.builder.switch_to_block(then_block);
@@ -1591,7 +1671,7 @@ impl<'a> Compiler<'a> {
 
                     // 获取目标类型 (即指针指向的类型)
                     // 注: 这里的 ty 应该是解引用后的类型（例如从 *i32 变成 i32）
-                    let target_ty = state.tcx_ref().get(*ty).clone();
+                    let target_ty = state.resolve_concrete_ty(*ty, state.subst);
                     let cranelift_ty = convert_type_to_cranelift_type(&target_ty);
 
                     // 3. 执行 load 操作
@@ -1604,6 +1684,12 @@ impl<'a> Compiler<'a> {
                 }
 
                 todo!("todo op {op}")
+            }
+
+            TypedExpression::Cast { val, ty, .. } => {
+                let val_expr = state.get_expr_cloned(*val);
+                let val = Self::compile_expr(state, &val_expr)?;
+                compile_cast(state, val, val_expr.get_type(), *ty)
             }
 
             _ => todo!("impl function 'compile_expr'"),
@@ -1645,6 +1731,7 @@ impl<'a> Compiler<'a> {
                     data_map: &mut self.data_map,
                     generic_map: &mut self.generic_map,
                     compiled_generic_map: &mut self.compiled_generic_map,
+                    subst: &IndexMap::new(),
 
                     table: Rc::new(RefCell::new(SymbolTable::from_outer(self.table))),
                     typed_module: &mut self.typed_module,
@@ -1729,6 +1816,46 @@ impl<'a> Compiler<'a> {
 
         let obj = self.module.finish();
         Ok(obj.emit().unwrap().to_vec())
+    }
+}
+
+impl<'a> Compiler<'a> {
+    pub fn substitute(
+        tcx: &ant_type_checker::ty_context::TypeContext,
+        param_ty: &ant_type_checker::ty::Ty,
+        arg_tyid: ant_type_checker::ty::TyId,
+        mapping: &mut indexmap::IndexMap<std::sync::Arc<str>, ant_type_checker::ty::TyId>,
+    ) {
+        use ant_type_checker::ty::Ty;
+
+        // 获取实参的真实类型
+        let arg_ty = tcx.get(arg_tyid);
+
+        match (param_ty, arg_ty) {
+            (Ty::Generic(..), Ty::Generic(..)) if param_ty == arg_ty => {
+                // 给给(Generic, Generic)列车, 不许发车!
+            }
+
+            (Ty::Generic(name, _), _) => {
+                mapping.insert(name.clone(), arg_tyid);
+            }
+
+            (Ty::Ptr(p_inner), Ty::Ptr(a_inner)) => {
+                Self::substitute(tcx, tcx.get(*p_inner), *a_inner, mapping);
+            }
+
+            (
+                Ty::AppliedGeneric(param_name, param_args),
+                Ty::AppliedGeneric(applied_name, applied_args),
+            ) => {
+                if param_name == applied_name {
+                    for (param, arg) in param_args.iter().zip(applied_args.iter()) {
+                        Self::substitute(tcx, tcx.get(*param), *arg, mapping);
+                    }
+                }
+            }
+            _ => {}
+        }
     }
 }
 

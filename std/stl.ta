@@ -2,135 +2,211 @@ extern "C" func printf(s: str, ...) -> i32;
 extern "C" func malloc(size: usize) -> *u8;
 extern "C" func free(ptr: *u8) -> u8;
 
-struct Vec<T> {
-	ptr: *T,
-	size: usize
+struct _raw_Vec<T>{
+    ptr: *T
+}
+// ptr[0] -> capacity
+// ptr[1] -> len
+
+struct Vec<T>{
+    raw: *_raw_Vec
 }
 
 func vec_init<T>(size_: usize) -> Vec<T> {
-	let o = new Vec {
-		ptr = malloc(size_) as *T
-		size = size_
-	};
-
-	o
+    let total = (2usize + size_) * sizeof T;
+    let data_ptr = malloc(total) as *T;
+    *(data_ptr + 0usize) = size_ as T;
+    *(data_ptr + 1usize) = size_ as T;
+    let raw = new _raw_Vec {
+        ptr = data_ptr
+    };
+    let v = new Vec {
+        raw = raw
+    };
+    v
 }
 
 func vec_free<T>(v: Vec<T>) {
-	if v.size != 0usize {
-		v.size = 0usize;
-		free(v.ptr);
-	}
+    if v.raw {
+        let len = *(v.raw.ptr + 1usize) as usize;
+        if len != 0usize {
+            *(v.raw.ptr + 1usize) = 0usize as T;
+            free(v.raw.ptr as *u8);
+        }
+        free(v.raw);
+    }
 }
 
-func vec_get<T>(v: Vec<T>, p: u8)-> T {
-	*(v.ptr + p)
+func vec_get<T>(v: Vec<T>, p: usize) -> T {
+    *(v.raw.ptr + 2usize + p)
 }
 
-func vec_post<T>(v: Vec<T>, p:u8, nv: T) {
-	*(v.ptr + p) = nv;
+func vec_post<T>(v: Vec<T>, p: usize, nv: T) {
+    *(v.raw.ptr + 2usize + p) = nv;
 }
 
-func vec_ref<T>(v: Vec<T>, p:u8) -> *T {
-	v.ptr + p
+func vec_ref<T>(v: Vec<T>, p: usize) -> *T {
+    v.raw.ptr + 2usize + p
 }
 
 func vec_size<T>(v: Vec<T>) -> usize {
-	v.size
+    *(v.raw.ptr + 1usize) as usize
 }
 
-//need `for`
-func vec_erase<T>(v: Vec<T>, p:u8) -> Vec<T> {
-	for(let post = p; post < v.size; post = post + 1){
-		vec_post(v,post, vec_get(v,post + 1));
-	}
-	
-	v.size = v.size - 1;
-	v
+func vec_begin<T>(v: Vec<T>) -> *T {
+    v.raw.ptr + 2usize
 }
 
-func vec_insert<T>(v: Vec<T>, p:u8, nv: T) -> Vec<T>{
-	let o = new Vec<T> {
-		ptr = malloc(v.size + 1)
-		size = v.size + 1
-	};
-
-	let postv = 0; let posto = 0;
-	for(postv < v.size; postv = posto + 1, posto = posto + 1) {
-		if(postv == p){
-			vec_post(o, posto, nv)
-			posto = posto + 1;
-		}
-		vec_post(o, posto, vec_get(v, postv));
-	}
-	vec_free(v);
-	o
+func vec_end<T>(v: Vec<T>) -> *T {
+    v.raw.ptr + 2usize + vec_size(v)
 }
 
-func vec_find<T> (v: Vec<T>, content: T) -> *T {
-    let i: usize = 0;
-    for(; i < v.size; i = i + 1) {
-        let pos = u8(i);
-        let current_val = vec_get(v, pos);
-        if (current_val == content) {
-            vec_ref(v, pos)
+func vec_erase<T>(v: Vec<T>, p: usize) {
+    let len = vec_size(v);
+    let post = p;
+    while post < len - 1usize {
+        vec_post(v, post, vec_get(v, post + 1usize));
+        post = post + 1usize;
+    }
+    *(v.raw.ptr + 1usize) = (len - 1usize) as T;
+}
+
+func vec_insert<T>(v: Vec<T>, p: usize, nv: T) {
+    let old_len = vec_size(v);
+    let cap = *(v.raw.ptr + 0usize) as usize;
+    let new_len = old_len + 1usize;
+    
+    let new_data = malloc((2usize + new_len) * sizeof T) as *T;
+    *(new_data + 0usize) = new_len as T;
+    *(new_data + 1usize) = new_len as T;
+
+    let i = 0usize;
+    while i < p {
+        *(new_data + 2usize + i) = vec_get(v, i);
+        i = i + 1usize;
+    }
+    *(new_data + 2usize + p) = nv;
+    while i < old_len {
+        *(new_data + 2usize + i + 1usize) = vec_get(v, i);
+        i = i + 1usize;
+    }
+
+    free(v.raw.ptr as *u8);
+    v.raw.ptr = new_data;
+}
+
+func vec_find<T>(v: Vec<T>, content: T) -> *T {
+    let i = 0usize;
+    let len = vec_size(v);
+    while i < len {
+        if vec_get(v, i) == content {
+            vec_ref(v, i)
         }
+        i = i + 1usize;
     }
     vec_end(v)
 }
 
-func vec_swap<T> (v: Vec<T>, i: u8, j: u8) -> void {
+func vec_swap<T>(v: Vec<T>, i: usize, j: usize) {
     let temp = vec_get(v, i);
     vec_post(v, i, vec_get(v, j));
     vec_post(v, j, temp);
 }
 
-func _vec_partition<T> (v: Vec<T>, low: usize, high: usize) -> usize {
-    let pivot_pos = u8(high);
-    let pivot_val = vec_get(v, pivot_pos);
-    let i: usize = low - 1;
-    let j: usize = low;
-    
-    for(; j < high; j = j + 1) {
-        let j_pos = u8(j);
-        if (vec_get(v, j_pos) <= pivot_val) {
-            i = i + 1;
-            vec_swap(v, u8(i), j_pos);
+func _vec_partition<T>(v: Vec<T>, low: usize, high: usize) -> usize {
+    let pivot_val = vec_get(v, high);
+    let i = low - 1usize;
+    let j = low;
+    while j < high {
+        if vec_get(v, j) <= pivot_val {
+            i = i + 1usize;
+            vec_swap(v, i, j);
         }
+        j = j + 1usize;
     }
-    vec_swap(v, u8(i+1), pivot_pos);
-    return i + 1;
+    vec_swap(v, i + 1usize, high);
+    i + 1usize
 }
 
-func _vec_quick_sort_recursive<T> (v: Vec<T>, low: usize, high: usize) -> void {
-    if (low < high) {
-        let pivot_idx = partition(v, low, high);
-        if (pivot_idx > 0) {
-            _vec_quick_sort_recursive(v, low, pivot_idx - 1);
+func _vec_quick_sort_recursive<T>(v: Vec<T>, low: usize, high: usize) {
+    if low < high {
+        let pivot = _vec_partition(v, low, high);
+        if pivot > 0usize {
+            _vec_quick_sort_recursive(v, low, pivot - 1usize);
         }
-        _vec_quick_sort_recursive(v, pivot_idx + 1, high);
+        _vec_quick_sort_recursive(v, pivot + 1usize, high);
     }
 }
 
-func vec_sort<T> (v: Vec<T>) -> void {
-    if (v.size <= 1) {
-        
-    }else{
-    	_vec_quick_sort_recursive(v, 0, v.size - 1);
+func vec_inita<T>(size_: usize, first: T) -> Vec<T> {
+    let v = vec_init<T>(size_);
+    vec_insert(v, 0usize, first);
+    v
+}
+
+func vec_empty<T>(v: Vec<T>) -> bool {
+    vec_size(v) == 0usize
+}
+
+func vec_resize<T>(v: Vec<T>, new_cap: usize) {
+    let old_cap = *(v.raw.ptr + 0usize) as usize;
+    let len = vec_size(v);
+    if new_cap == old_cap {
+        return;
     }
+    let new_len = len;
+    if new_cap < len {
+        new_len = new_cap;
+    }
+    let new_data = malloc((2usize + new_cap) * sizeof T) as *T;
+    *(new_data + 0usize) = new_cap as T;
+    *(new_data + 1usize) = new_len as T;
+    let i = 0usize;
+    while i < new_len {
+        *(new_data + 2usize + i) = vec_get(v, i);
+        i = i + 1usize;
+    }
+    free(v.raw.ptr as *u8);
+    v.raw.ptr = new_data;
 }
 
-func vec_begin<T> (v: Vec<T>) -> *T {
-	v.ptr
+
+func vec_push<T>(v: Vec<T>, nv: T) {
+    vec_insert(v, vec_size(v), nv);
 }
 
-func vec_end<T> (v: Vec<T>) -> *T {
-	v.ptr+v.size
+func vec_pop<T>(v: Vec<T>) {
+    vec_erase(v, vec_size(v) - 1usize);
 }
 
-//usage:
-//let v=vec_init<u8>(5usize);
-//defer vec_free(v);
-//
-//v=vec_insert(v,0u8,91u8);
-//(use v)...
+func vec_data<T>(v: Vec<T>) -> *T {
+    v.raw.ptr + 2usize
+}
+
+func vec_build<T>(raw: *T, len: usize) -> Vec<T> {
+    if raw == 0 as *T || len == 0usize {
+        vec_init<T>(0usize)
+    }
+    let v = vec_init<T>(len);
+    let i = 0usize;
+    while i < len {
+        vec_post(v, i, *(raw + i));
+        i = i + 1usize;
+    }
+    v
+}
+
+func vec_copy<T>(ov: Vec<T>) -> Vec<T> {
+    vec_build(vec_data(ov), vec_size(ov))
+}
+
+func main() -> i32 {
+    let v = vec_inita(5usize, 13i32);
+    vec_insert(v, 1usize, 91i32);
+    vec_insert(v, 2usize, 71i32);
+
+    printf("first: %d\n", vec_get(v, 0usize));
+    printf("second: %d\n", vec_get(v, 1usize));
+    printf("third: %d\n", vec_get(v, 2usize));
+    return 0;
+}
