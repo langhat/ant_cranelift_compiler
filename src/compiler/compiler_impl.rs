@@ -8,6 +8,8 @@ use std::{
     },
 };
 
+use ant_ast::expr::FloatValue;
+use bigdecimal::ToPrimitive;
 use cranelift::prelude::{AbiParam, InstBuilder, IntCC, MemFlags, Signature, Value, types};
 use cranelift_codegen::{
     ir::{Function, UserFuncName},
@@ -19,7 +21,7 @@ use cranelift_object::{ObjectBuilder, ObjectModule};
 
 use ant_type_checker::{
     module::TypedModule,
-    ty::{IntTy, Ty, display_ty},
+    ty::{FloatTy, IntTy, Ty, display_ty},
     typed_ast::{
         GetType, typed_expr::TypedExpression, typed_node::TypedNode, typed_stmt::TypedStatement,
     },
@@ -171,6 +173,10 @@ impl<'a> Compiler<'a> {
     ) -> Result<u32, String> {
         match ty {
             Ty::IntTy(it) => Ok(it.get_bytes_size() as u32),
+            Ty::FloatTy(it) => Ok(match it {
+                FloatTy::F32 => 4,
+                FloatTy::F64 => 8,
+            }),
             Ty::Bool => Ok(1),
             Ty::Str => Ok(pointer_width / 8),
             Ty::Function { .. } => Ok(pointer_width / 8),
@@ -990,6 +996,45 @@ impl<'a> Compiler<'a> {
 
     pub fn compile_expr(state: &mut FunctionState, expr: &TypedExpression) -> CompileResult<Value> {
         match expr {
+            TypedExpression::UnknownTypeInt { value, ty, .. } => Ok({
+                let ty = state.tcx_ref().get(*ty).clone();
+
+                use bigdecimal::ToPrimitive;
+
+                // 根据目标类型检查范围
+                let (min, max) = match ty {
+                    Ty::IntTy(IntTy::I8) => (i8::MIN as i64, i8::MAX as i64),
+                    Ty::IntTy(IntTy::I16) => (i16::MIN as i64, i16::MAX as i64),
+                    Ty::IntTy(IntTy::I32) => (i32::MIN as i64, i32::MAX as i64),
+                    Ty::IntTy(IntTy::I64) => (i64::MIN, i64::MAX),
+                    Ty::IntTy(IntTy::U8) => (0, u8::MAX as i64),
+                    Ty::IntTy(IntTy::U16) => (0, u16::MAX as i64),
+                    Ty::IntTy(IntTy::U32) => (0, u32::MAX as i64),
+                    Ty::IntTy(IntTy::U64) => (0, u64::MAX as i64),
+                    Ty::IntTy(IntTy::ISize) => (0, isize::MAX as i64),
+                    Ty::IntTy(IntTy::USize) => (0, usize::MAX as i64),
+                    _ => (i64::MIN, i64::MAX),
+                };
+
+                let val = value.to_i64().ok_or_else(|| format!("integer overflow"))?;
+
+                if val < min || val > max {
+                    return Err(format!("integer overflow"));
+                }
+
+                state
+                    .builder
+                    .ins()
+                    .iconst(convert_type_to_cranelift_type(&ty), val)
+            }),
+
+            TypedExpression::Float { value, .. } => Ok({
+                match value {
+                    FloatValue::F32(it) => state.builder.ins().f32const(it.to_f32().unwrap()),
+                    FloatValue::F64(it) => state.builder.ins().f64const(it.to_f64().unwrap()),
+                }
+            }),
+
             TypedExpression::Int { value, ty, .. } => Ok({
                 let ty = state.tcx_ref().get(*ty).clone();
 
